@@ -1,0 +1,32 @@
+app = "store-dashboard-bot"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  WA_SESSION_PATH = "/data/session"
+  PORT = "3001"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "wa_session"
+  destination = "/data/session"
+
+[http_service]
+  internal_port = 3001
+  force_https = false
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/"

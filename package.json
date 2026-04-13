@@ -1,0 +1,26 @@
+{
+  "name": "store-dashboard-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch index.ts",
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.51.0",
+    "dotenv": "^16.0.0",
+    "@hapi/boom": "^10.0.1",
+    "@supabase/supabase-js": "^2.103.0",
+    "@types/pdfkit": "^0.17.5",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "openai": "^4.103.0",
+    "pdfkit": "^0.18.0",
+    "pino": "^9.7.0",
+    "qrcode-terminal": "^0.12.0",
+    "tsx": "^4.19.3"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
