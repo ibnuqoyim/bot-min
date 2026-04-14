@@ -340,7 +340,7 @@ export async function generateInvoicePDF(customerName: string, storeId?: string 
         )
     }
 
-    // Fetch logo for watermark (non-blocking — invoice still works without it)
+    // Fetch logo for watermark from stores table (non-blocking — invoice still works without it)
     const logoBuffer = store?.logo_url ? await fetchLogoBuffer(store.logo_url) : null
 
     const buffer = await buildPDF(order, store, logoBuffer)
