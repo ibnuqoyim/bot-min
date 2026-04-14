@@ -197,7 +197,7 @@ async function handleMessage(
         if (!body) {
             await sendText(
                 sock, rawJid,
-                '⚠️ Format:\n/produk upsert\n<code> | <nama> | <hpp> | <harga>\n\nContoh:\nSD | Sourdough Loaf | 25000 | 30000\nCR | Croissant | 15000 | 22000',
+                '⚠️ Format:\n/produk upsert\n<code> , <nama> , <hpp> , <harga>\n\nContoh:\nSD , Sourdough Loaf , 25000 , 30000\nCR , Croissant , 15000 , 22000',
             )
             return
         }
@@ -205,7 +205,7 @@ async function handleMessage(
         if (!rows) {
             await sendText(
                 sock, rawJid,
-                '⚠️ Format tidak valid. Tiap baris harus:\n<code> | <nama> | <hpp> | <harga>\n\nContoh:\nSD | Sourdough | 25000 | 30000',
+                '⚠️ Format tidak valid. Tiap baris harus:\n<code> , <nama> , <hpp> , <harga>\n\nContoh:\nSD , Sourdough , 25000 , 30000',
             )
             return
         }
