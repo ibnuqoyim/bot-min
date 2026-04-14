@@ -5,33 +5,45 @@ function formatRupiah(amount: number): string {
     return 'Rp ' + amount.toLocaleString('id-ID')
 }
 
-async function generateInvoiceNumber(): Promise<string> {
+async function generateInvoiceNumber(storeId?: string | null, prefix?: string | null): Promise<string> {
     const sb = getSupabase()
-    const { data: orders } = await sb
-        .from('orders')
-        .select('invoice_number')
-        .order('invoice_number', { ascending: false })
-        .limit(1)
 
     const now = new Date()
     const currentYYYYMM =
         String(now.getFullYear()) + String(now.getMonth() + 1).padStart(2, '0')
 
-    if (!orders || orders.length === 0) {
-        return currentYYYYMM + '01'
-    }
+    // Query last 50 orders scoped to this store to find current month's sequence
+    let query = sb
+        .from('orders')
+        .select('invoice_number')
+        .order('created_at', { ascending: false })
+        .limit(50)
 
-    const last = orders[0].invoice_number
-    const lastYYYYMM = last.slice(0, 6)
-    const lastXX = parseInt(last.slice(6, 8), 10)
-
-    if (lastYYYYMM === currentYYYYMM) {
-        const next = lastXX + 1
-        if (next > 99) throw new Error('Nomor invoice bulan ini sudah penuh (99 order).')
-        return currentYYYYMM + String(next).padStart(2, '0')
+    if (storeId) {
+        query = query.eq('store_id', storeId)
     } else {
-        return currentYYYYMM + '01'
+        query = query.is('store_id', null)
     }
+
+    const { data: orders } = await query
+
+    const prefixStr = prefix ? `${prefix}-` : ''
+
+    // Strip prefix and find last sequence in current month
+    let lastSeq = 0
+    for (const o of orders ?? []) {
+        const numericPart = o.invoice_number.includes('-')
+            ? o.invoice_number.split('-').pop()!        // "PREFIX-YYYYMMXXX" → "YYYYMMXXX"
+            : o.invoice_number                          // legacy "YYYYMMXX"
+        if (numericPart.startsWith(currentYYYYMM)) {
+            lastSeq = parseInt(numericPart.slice(6), 10)
+            break
+        }
+    }
+
+    const next = lastSeq + 1
+    if (next > 999) throw new Error('Nomor invoice bulan ini sudah penuh (999 order).')
+    return `${prefixStr}${currentYYYYMM}${String(next).padStart(3, '0')}`
 }
 
 export interface OrderItem {
@@ -78,7 +90,7 @@ export async function createOrder(
         let query = sb
             .from('products')
             .select('id, name, code, price')
-            .ilike('code', `%${item.code}%`)
+            .ilike('code', item.code)
             .limit(1)
 
         if (storeId) {
@@ -104,9 +116,20 @@ export async function createOrder(
         throw new Error(`Produk tidak ditemukan: *${notFound.join(', ')}*\nCek nama produk di dashboard.`)
     }
 
+    // Fetch store's invoice prefix (if any)
+    let invoicePrefix: string | null = null
+    if (storeId) {
+        const { data: storeRow } = await sb
+            .from('stores')
+            .select('invoice_prefix')
+            .eq('id', storeId)
+            .maybeSingle()
+        invoicePrefix = storeRow?.invoice_prefix ?? null
+    }
+
     const [batch, invoiceNumber] = await Promise.all([
         getLatestBatch(storeId),
-        generateInvoiceNumber(),
+        generateInvoiceNumber(storeId, invoicePrefix),
     ])
 
     const today = new Date().toISOString().split('T')[0]
@@ -275,6 +298,115 @@ export async function getProductList(search?: string, readyOnly = false, storeId
 
     return header + `\`\`\`\n${lines.join('\n')}\n\`\`\`` +
         `\n\nGunakan kode dalam bracket untuk order:\n/order <nama> | SD:2, CR:1`
+}
+
+interface ProductUpsertRow {
+    code: string
+    name: string
+    hpp: number
+    price: number
+}
+
+/**
+ * Parse bulk product lines.
+ * Format per line: code | name | hpp | price
+ * Returns null if any line is malformed.
+ */
+export function parseProductUpsertLines(text: string): ProductUpsertRow[] | null {
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+    if (lines.length === 0) return null
+
+    const rows: ProductUpsertRow[] = []
+    for (const line of lines) {
+        const parts = line.split(',').map(s => s.trim())
+        if (parts.length < 4) return null
+
+        const [code, name, hppRaw, priceRaw] = parts
+        const hpp   = parseInt(hppRaw.replace(/\D/g, ''), 10)
+        const price = parseInt(priceRaw.replace(/\D/g, ''), 10)
+
+        if (!code || !name || isNaN(hpp) || isNaN(price)) return null
+        rows.push({ code: code.toUpperCase(), name, hpp, price })
+    }
+
+    return rows.length > 0 ? rows : null
+}
+
+/**
+ * Bulk upsert products by code.
+ * - If a product with the same code (and storeId) exists → update name, hpp, price.
+ * - Otherwise → insert new product.
+ */
+export async function upsertProducts(
+    rows: ProductUpsertRow[],
+    storeId?: string | null,
+): Promise<string> {
+    const sb = getSupabase()
+
+    const codes = rows.map(r => r.code)
+
+    // Find existing products matching codes (scoped to store or global)
+    let query = sb
+        .from('products')
+        .select('id, code')
+        .in('code', codes)
+
+    if (storeId) {
+        query = query.or(`store_id.eq.${storeId},store_id.is.null`)
+    }
+
+    const { data: existing } = await query
+    const existingMap = new Map<string, string>(
+        (existing ?? []).map(p => [p.code.toUpperCase(), p.id])
+    )
+
+    const toUpdate: { id: string; row: ProductUpsertRow }[] = []
+    const toInsert: ProductUpsertRow[] = []
+
+    for (const row of rows) {
+        const id = existingMap.get(row.code)
+        if (id) {
+            toUpdate.push({ id, row })
+        } else {
+            toInsert.push(row)
+        }
+    }
+
+    // Run updates
+    for (const { id, row } of toUpdate) {
+        const { error } = await sb
+            .from('products')
+            .update({ name: row.name, cost_price: row.hpp, price: row.price })
+            .eq('id', id)
+        if (error) throw new Error(`Gagal update ${row.code}: ${error.message}`)
+    }
+
+    // Run inserts
+    if (toInsert.length > 0) {
+        const { error } = await sb.from('products').insert(
+            toInsert.map(r => ({
+                code:     r.code,
+                name:     r.name,
+                cost_price:      r.hpp,
+                price:    r.price,
+                is_active: true,
+                store_id: storeId ?? null,
+            }))
+        )
+        if (error) throw new Error(`Gagal insert produk baru: ${error.message}`)
+    }
+
+    const updatedLines = toUpdate.map(({ row }) =>
+        `  ✏️ [${row.code}] ${row.name} — ${formatRupiah(row.price)}`
+    )
+    const insertedLines = toInsert.map(row =>
+        `  ➕ [${row.code}] ${row.name} — ${formatRupiah(row.price)}`
+    )
+
+    return (
+        `✅ *Produk berhasil disimpan* (${rows.length} item)\n\n` +
+        [...updatedLines, ...insertedLines].join('\n')
+    )
 }
 
 export async function getLatestBatchResume(storeId?: string | null): Promise<string> {

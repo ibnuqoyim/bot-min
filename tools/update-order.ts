@@ -73,7 +73,7 @@ export async function addItemsToOrder(
         const { data: products } = await sb
             .from('products')
             .select('id, name, price')
-            .ilike('code', `%${item.code}%`)
+            .ilike('code', item.code)
             .limit(1)
 
         if (!products || products.length === 0) {

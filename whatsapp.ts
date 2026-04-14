@@ -16,7 +16,7 @@ import { resolveStoreForNumber, addNumberToWhitelist } from './runtime-config.ts
 import { getMessages, appendMessage, resetHistory, historyLength } from './conversation.ts'
 import type { AIProvider } from './providers/types.ts'
 import { createBatchPO } from './tools/po.ts'
-import { createOrder, getOrdersByCustomer, getLatestBatchResume, parseOrderItems, getProductList } from './tools/order.ts'
+import { createOrder, getOrdersByCustomer, getLatestBatchResume, parseOrderItems, getProductList, upsertProducts, parseProductUpsertLines } from './tools/order.ts'
 import { generateInvoicePDF } from './tools/invoice.ts'
 import { addItemsToOrder, updateItemQty, setShipping, markOrderPaid } from './tools/update-order.ts'
 
@@ -165,6 +165,7 @@ async function handleMessage(
             `/produk              — daftar semua produk & kode\n` +
             `/produk ready        — produk yang sedang ready\n` +
             `/produk <kata>       — cari produk by nama/kode\n` +
+            `/produk upsert       — bulk insert/update produk by kode\n` +
             `/resume              — ringkasan order di batch terbaru\n` +
             `/cari <nama>         — cari pesanan by nama pemesan\n` +
             `/bayar <nama>        — tandai order lunas\n` +
@@ -190,6 +191,32 @@ async function handleMessage(
 
     // ── Store tools ──────────────────────────────────────────────────────────
     // storeId and systemPrompt already resolved from storeBinding above
+
+    if (text.toLowerCase().startsWith('/produk upsert')) {
+        const body = text.slice('/produk upsert'.length).trim()
+        if (!body) {
+            await sendText(
+                sock, rawJid,
+                '⚠️ Format:\n/produk upsert\n<code> | <nama> | <hpp> | <harga>\n\nContoh:\nSD | Sourdough Loaf | 25000 | 30000\nCR | Croissant | 15000 | 22000',
+            )
+            return
+        }
+        const rows = parseProductUpsertLines(body)
+        if (!rows) {
+            await sendText(
+                sock, rawJid,
+                '⚠️ Format tidak valid. Tiap baris harus:\n<code> | <nama> | <hpp> | <harga>\n\nContoh:\nSD | Sourdough | 25000 | 30000',
+            )
+            return
+        }
+        try {
+            const result = await upsertProducts(rows, storeId)
+            await sendText(sock, rawJid, result)
+        } catch (err: any) {
+            await sendText(sock, rawJid, `⚠️ ${err.message}`)
+        }
+        return
+    }
 
     if (text.toLowerCase() === '/produk' || text.toLowerCase().startsWith('/produk ')) {
         const arg = text.slice('/produk'.length).trim()
