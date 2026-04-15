@@ -4,6 +4,7 @@ import makeWASocket, {
     fetchLatestBaileysVersion,
     isJidBroadcast,
     isJidGroup,
+    downloadMediaMessage,
     type WASocket,
     type WAMessage,
     type Contact,
@@ -19,6 +20,16 @@ import { createBatchPO } from './tools/po.ts'
 import { createOrder, getOrdersByCustomer, getLatestBatchResume, parseOrderItems, getProductList, upsertProducts, parseProductUpsertLines } from './tools/order.ts'
 import { generateInvoicePDF } from './tools/invoice.ts'
 import { addItemsToOrder, updateItemQty, setShipping, markOrderPaid } from './tools/update-order.ts'
+import { parseStoreForm, createStore, uploadLogoToCloudinary, updateStoreLogo, STORE_FORM_TEMPLATE } from './tools/store.ts'
+
+// ─── Multi-step flow state ────────────────────────────────────────────────────
+
+type FlowState =
+    | { step: 'waiting_form' }
+    | { step: 'waiting_logo'; storeId: string; storeName: string }
+
+/** Pending multi-step conversations, keyed by resolved JID. */
+const pendingFlows = new Map<string, FlowState>()
 
 // ─── LID → phone JID mapping ──────────────────────────────────────────────────
 
@@ -68,6 +79,13 @@ function extractText(msg: WAMessage): string {
     ).trim()
 }
 
+/** True when the message carries an image (with or without caption). */
+function isImageMessage(msg: WAMessage): boolean {
+    const m = msg.message
+    if (!m) return false
+    return !!(m.imageMessage ?? m.viewOnceMessage?.message?.imageMessage)
+}
+
 /** Send a text reply to a JID. */
 async function sendText(sock: WASocket, jid: string, text: string): Promise<void> {
     await sock.sendMessage(jid, { text })
@@ -84,8 +102,10 @@ async function handleMessage(
     // Resolve LID → phone JID for auth and conversation history
     const jid = resolveJid(rawJid)
     const text = extractText(msg)
+    const hasImage = isImageMessage(msg)
 
-    if (!text) return
+    // Allow image-only messages through when user is in waiting_logo state
+    if (!text && !(hasImage && pendingFlows.get(jid)?.step === 'waiting_logo')) return
 
     const phoneNum = jid.split('@')[0]
 
@@ -177,6 +197,8 @@ async function handleMessage(
             `/update <nama> ongkir <kurir>:<biaya>   — set ongkir + kurir\n` +
             `/po baru <nama>                — buat batch PO baru\n` +
             `/po baru <nama> | SD, CR, FO   — buat PO + set produk ready\n\n` +
+            `*Manajemen Toko:*\n` +
+            `/store baru — buat toko baru (multi-step)\n\n` +
             `*Bot:*\n` +
             `/whitelist <store-id> — daftarkan nomor kamu ke bot ini\n` +
             `/status — status bot\n` +
@@ -255,6 +277,100 @@ async function handleMessage(
         } catch (err: any) {
             await sendText(sock, rawJid, `⚠️ ${err.message}`)
         }
+        return
+    }
+
+    // ── /store baru — multi-step store creation ──────────────────────────────
+    if (text.toLowerCase() === '/store baru') {
+        pendingFlows.set(jid, { step: 'waiting_form' })
+        await sendText(
+            sock, rawJid,
+            `🏪 *Buat Toko Baru*\n\n` +
+            `Copy format berikut, isi semua field yang diperlukan, lalu kirim kembali:\n\n` +
+            `\`\`\`\n${STORE_FORM_TEMPLATE}\`\`\`\n\n` +
+            `Ketik */batal* untuk membatalkan.`,
+        )
+        return
+    }
+
+    if (text.toLowerCase() === '/batal') {
+        if (pendingFlows.has(jid)) {
+            pendingFlows.delete(jid)
+            await sendText(sock, rawJid, '❌ Dibatalkan.')
+        }
+        return
+    }
+
+    // ── Handle pending flow states ────────────────────────────────────────────
+    const flow = pendingFlows.get(jid)
+
+    if (flow?.step === 'waiting_form') {
+        // If user sent a command, cancel the flow and let it fall through
+        if (text.startsWith('/')) {
+            pendingFlows.delete(jid)
+            // fall through to normal command handling below
+        } else {
+            const parsed = parseStoreForm(text)
+            if (!parsed) {
+                await sendText(
+                    sock, rawJid,
+                    `⚠️ Format tidak dikenali. Pastikan kamu mengirim form yang sudah diisi.\n\n` +
+                    `Field wajib: *Nama Toko*\n\n` +
+                    `Atau ketik */batal* untuk membatalkan.`,
+                )
+                return
+            }
+
+            try {
+                const storeId = await createStore(parsed)
+                pendingFlows.set(jid, { step: 'waiting_logo', storeId, storeName: parsed.name })
+
+                await sendText(
+                    sock, rawJid,
+                    `✅ Toko *${parsed.name}* berhasil dibuat!\n` +
+                    `Store ID: \`${storeId}\`\n\n` +
+                    `Sekarang kirim *foto logo* toko kamu.\n` +
+                    `Ketik */batal* untuk skip logo.`,
+                )
+            } catch (err: any) {
+                pendingFlows.delete(jid)
+                await sendText(sock, rawJid, `⚠️ ${err.message}`)
+            }
+            return
+        }
+    }
+
+    if (flow?.step === 'waiting_logo') {
+        if (hasImage) {
+            try {
+                await sock.sendPresenceUpdate('composing', rawJid)
+                const buffer = await downloadMediaMessage(msg, 'buffer', {}) as Buffer
+                const logoUrl = await uploadLogoToCloudinary(buffer, flow.storeName)
+                await updateStoreLogo(flow.storeId, logoUrl)
+                pendingFlows.delete(jid)
+
+                await sendText(
+                    sock, rawJid,
+                    `✅ Logo *${flow.storeName}* berhasil diupload!\n${logoUrl}`,
+                )
+            } catch (err: any) {
+                pendingFlows.delete(jid)
+                await sendText(sock, rawJid, `⚠️ ${err.message}`)
+            }
+            return
+        }
+
+        // Text message while waiting for logo
+        if (text.toLowerCase() === '/batal') {
+            pendingFlows.delete(jid)
+            await sendText(sock, rawJid, '✅ Logo dilewati. Toko berhasil dibuat tanpa logo.')
+            return
+        }
+
+        await sendText(
+            sock, rawJid,
+            `📷 Kirim *foto logo* untuk toko ini.\nAtau ketik */batal* untuk melewati.`,
+        )
         return
     }
 
