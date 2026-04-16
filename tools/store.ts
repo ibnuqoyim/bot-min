@@ -60,9 +60,11 @@ export function parseStoreForm(text: string): StoreFormData | null {
 // ─── Create store ─────────────────────────────────────────────────────────────
 
 /**
- * Insert a new store row. Returns the new store's UUID.
+ * Insert a new store row and automatically create a bot_config for it.
+ * creatorPhone is added to both allowed_numbers and super_admin_numbers of the new bot_config.
+ * Returns the new store's UUID.
  */
-export async function createStore(data: StoreFormData): Promise<string> {
+export async function createStore(data: StoreFormData, creatorPhone?: string): Promise<string> {
     const sb = getSupabase()
 
     const { data: store, error } = await sb
@@ -81,7 +83,35 @@ export async function createStore(data: StoreFormData): Promise<string> {
         .single()
 
     if (error) throw new Error('Gagal membuat toko: ' + error.message)
+
+    // Auto-create bot_config for the new store
+    await createBotConfigForStore(store.id, creatorPhone)
+
     return store.id
+}
+
+/**
+ * Create a default bot_config row for a newly created store.
+ * The creator's phone number is added to allowed_numbers and super_admin_numbers.
+ */
+async function createBotConfigForStore(storeId: string, creatorPhone?: string): Promise<void> {
+    const sb = getSupabase()
+    const phones = creatorPhone ? creatorPhone : ''
+
+    const { error } = await sb.from('bot_config').insert({
+        store_id:             storeId,
+        is_active:            true,
+        allowed_numbers:      phones,
+        super_admin_numbers:  phones,
+        system_prompt:        '',
+        ai_provider:          process.env.AI_PROVIDER || 'openrouter',
+        ai_model:             process.env.OPENROUTER_MODEL || process.env.CLAUDE_MODEL || process.env.OPENAI_MODEL || 'openai/gpt-4o-mini',
+    })
+
+    if (error) {
+        // Non-fatal: store was created, bot_config can be set up from dashboard
+        console.warn('[store] Could not auto-create bot_config:', error.message)
+    }
 }
 
 // ─── Upload logo to Cloudinary ────────────────────────────────────────────────

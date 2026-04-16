@@ -1,5 +1,9 @@
 import { getSupabase } from '../supabase.ts'
 
+function fmt(n: number): string {
+    return 'Rp ' + n.toLocaleString('id-ID')
+}
+
 export interface Batch {
     id: string
     name: string
@@ -87,4 +91,90 @@ export async function getLatestBatch(storeId?: string | null): Promise<Batch | n
 
     const { data } = await query.maybeSingle()
     return data
+}
+
+// ─── PO form (multi-step flow) ────────────────────────────────────────────────
+
+export interface POFormProduct {
+    code: string
+    name: string
+    price: number
+}
+
+export interface POFormResult {
+    batchName: string
+    codes: string[]  // product codes to open; empty = create batch without opening any
+}
+
+/**
+ * Fetch all active products to populate the PO form.
+ */
+export async function getProductsForPOForm(storeId?: string | null): Promise<POFormProduct[]> {
+    const sb = getSupabase()
+
+    let query = sb
+        .from('products')
+        .select('name, code, price')
+        .eq('is_active', true)
+        .not('code', 'is', null)
+        .order('name')
+        .limit(50)
+
+    if (storeId) query = query.or(`store_id.eq.${storeId},store_id.is.null`)
+
+    const { data } = await query
+    return (data ?? [])
+        .filter(p => p.code)
+        .map(p => ({ code: p.code!, name: p.name, price: p.price }))
+}
+
+/**
+ * Generate the PO form template to send to the user.
+ */
+export function buildPOFormTemplate(products: POFormProduct[], storeName?: string | null): string {
+    const productLines = products
+        .map(p => `${p.code} | ${p.name} | ${fmt(p.price)} | `)
+        .join('\n')
+
+    return (
+        `📋 *Form Batch PO Baru${storeName ? ` — ${storeName}` : ''}*\n\n` +
+        `Nama Batch: \n\n` +
+        `*— Buka Produk —*\n` +
+        `_(isi ✓ di kolom terakhir untuk membuka produk di batch ini)_\n\n` +
+        productLines +
+        `\n\n_(ketik /batal untuk membatalkan)_`
+    )
+}
+
+/**
+ * Parse a filled PO form.
+ * Returns null if Nama Batch is missing.
+ */
+export function parsePOForm(text: string, products: POFormProduct[]): POFormResult | null {
+    const lines = text.split('\n').map(l => l.trim())
+    const lower = lines.map(l => l.toLowerCase())
+
+    // Extract batch name
+    const namaIdx = lower.findIndex(l => l.startsWith('nama batch:'))
+    if (namaIdx === -1) return null
+    const batchName = lines[namaIdx].slice(lines[namaIdx].indexOf(':') + 1).trim()
+    if (!batchName) return null
+
+    // Extract opened products — any non-empty last column marks the product as open
+    const validCodes = new Set(products.map(p => p.code.toLowerCase()))
+    const codes: string[] = []
+
+    for (const line of lines) {
+        if (!line.includes('|')) continue
+        const parts = line.split('|').map(p => p.trim())
+        if (parts.length < 2) continue
+
+        const code = parts[0].toUpperCase()
+        if (!validCodes.has(code.toLowerCase())) continue
+
+        const marker = parts[parts.length - 1]
+        if (marker !== '') codes.push(code)
+    }
+
+    return { batchName, codes }
 }

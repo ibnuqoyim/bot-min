@@ -91,11 +91,42 @@ async function fetchStoreInfo(storeId?: string | null): Promise<StoreInfo | null
     return data as StoreInfo | null
 }
 
+/**
+ * Cloudinary URL → append transformations before the version/path segment
+ * to get a transparent-background PNG suitable for watermark use.
+ *
+ * Original:  .../upload/v123/store-logos/foo.jpg
+ * Becomes:   .../upload/e_trim,b_transparent,f_png/v123/store-logos/foo.jpg
+ *
+ * e_trim         – trims uniform-color border/background edges
+ * b_transparent  – fills trimmed area with transparency
+ * f_png          – delivers as PNG (supports alpha channel)
+ *
+ * If the plan doesn't support e_trim the transform is ignored gracefully;
+ * f_png alone at least guarantees an alpha-capable container.
+ */
+function toTransparentPng(logoUrl: string): string {
+    if (!logoUrl.includes('res.cloudinary.com') || !logoUrl.includes('/upload/')) {
+        return logoUrl
+    }
+    return logoUrl.replace('/upload/', '/upload/e_trim,b_transparent,f_png/')
+}
+
 async function fetchLogoBuffer(logoUrl: string): Promise<Buffer | null> {
     try {
-        const res = await fetch(logoUrl)
-        if (!res.ok) return null
-        return Buffer.from(await res.arrayBuffer())
+        // Try transparency-optimised variant first, fall back to original URL
+        const urls = [toTransparentPng(logoUrl), logoUrl]
+
+        for (const url of urls) {
+            try {
+                const res = await fetch(url)
+                if (!res.ok) continue
+                return Buffer.from(await res.arrayBuffer())
+            } catch {
+                continue
+            }
+        }
+        return null
     } catch {
         return null
     }

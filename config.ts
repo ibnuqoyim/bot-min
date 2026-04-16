@@ -62,6 +62,15 @@ export const config = {
         serviceKey: optional('SUPABASE_SERVICE_ROLE_KEY', ''),
     },
 
+    // ── Super admins ──────────────────────────────────────────────────────────
+    // Comma-separated phone numbers with cross-store admin privileges.
+    // These can create/update stores from the bot even before any store exists.
+    // Format: international without '+' → e.g. 6281234567890
+    superAdminNumbers: optional('SUPER_ADMIN_PHONES', '')
+        .split(',')
+        .map(n => n.trim())
+        .filter(Boolean),
+
     // ── Multi-store ───────────────────────────────────────────────────────────
     // Set BOT_STORE_ID on each Fly.io instance to identify which store this
     // bot belongs to. The bot will read bot_config WHERE store_id = BOT_STORE_ID.

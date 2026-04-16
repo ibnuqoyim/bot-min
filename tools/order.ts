@@ -77,6 +77,7 @@ export async function createOrder(
     customerName: string,
     items: OrderItem[],
     storeId?: string | null,
+    phone?: string | null,
 ): Promise<string> {
     const sb = getSupabase()
 
@@ -140,6 +141,7 @@ export async function createOrder(
             invoice_number: invoiceNumber,
             date: today,
             customer_name: customerName.trim(),
+            phone: phone?.trim() || null,
             status: 'pending',
             po_id: batch?.id ?? null,
             store_id: storeId ?? null,
@@ -300,6 +302,149 @@ export async function getProductList(search?: string, readyOnly = false, storeId
         `\n\nGunakan kode dalam bracket untuk order:\n/order <nama> | SD:2, CR:1`
 }
 
+// ─── Order form (multi-step customer flow) ────────────────────────────────────
+
+export interface OrderFormProduct {
+    code: string
+    name: string
+    price: number
+}
+
+export interface OrderFormResult {
+    customerName: string
+    phone: string | null
+    items: OrderItem[]
+}
+
+/**
+ * Fetch products available for the order form.
+ * Prefers products opened in the latest batch (ready); falls back to all active.
+ * Returns at most 30 products.
+ */
+export async function getProductsForOrderForm(storeId?: string | null): Promise<{
+    products: OrderFormProduct[]
+    batchName: string | null
+}> {
+    const sb = getSupabase()
+
+    // Try latest batch first
+    const batch = await getLatestBatch(storeId)
+    if (batch) {
+        const { data: poItems } = await sb
+            .from('po_list')
+            .select('products ( name, code, price )')
+            .eq('po_id', batch.id)
+
+        if (poItems && poItems.length > 0) {
+            type P = { name: string; code: string | null; price: number }
+            const products: OrderFormProduct[] = poItems
+                .map(i => {
+                    const raw = i.products
+                    return (Array.isArray(raw) ? raw[0] : raw) as P | null
+                })
+                .filter((p): p is P => p !== null && !!p.code)
+                .map(p => ({ code: p.code!, name: p.name, price: p.price }))
+
+            if (products.length > 0) return { products, batchName: batch.name }
+        }
+    }
+
+    // Fallback: all active products
+    let query = sb
+        .from('products')
+        .select('name, code, price')
+        .eq('is_active', true)
+        .not('code', 'is', null)
+        .order('name')
+        .limit(30)
+
+    if (storeId) query = query.or(`store_id.eq.${storeId},store_id.is.null`)
+
+    const { data } = await query
+    const products: OrderFormProduct[] = (data ?? [])
+        .filter(p => p.code)
+        .map(p => ({ code: p.code!, name: p.name, price: p.price }))
+
+    return { products, batchName: null }
+}
+
+/**
+ * Generate the order form template string to send to the customer.
+ */
+export function buildOrderFormTemplate(
+    products: OrderFormProduct[],
+    storeName: string,
+    batchName: string | null,
+): string {
+    const productLines = products
+        .map(p => `${p.code} | ${p.name} | ${formatRupiah(p.price)} | `)
+        .join('\n')
+
+    return (
+        `📋 *Form Order${storeName ? ` — ${storeName}` : ''}*\n` +
+        (batchName ? `📦 Batch: *${batchName}*\n` : '') +
+        `\nIsi form berikut lalu kirim kembali 👇\n` +
+        `_(ketik /batal untuk membatalkan)_\n\n` +
+        `Nama: \n` +
+        `No. HP: \n\n` +
+        `*— Produk —*\n` +
+        `_(isi angka qty, biarkan kosong jika tidak order)_\n\n` +
+        productLines
+    )
+}
+
+/**
+ * Parse a filled order form.
+ * Returns null if Nama is missing or no items with qty > 0 found.
+ */
+export function parseOrderForm(
+    text: string,
+    products: OrderFormProduct[],
+): OrderFormResult | null {
+    const lines = text.split('\n').map(l => l.trim())
+    const lowerLines = lines.map(l => l.toLowerCase())
+
+    // Extract Nama
+    const namaIdx = lowerLines.findIndex(l => l.startsWith('nama:'))
+    if (namaIdx === -1) return null
+    const customerName = lines[namaIdx].slice(lines[namaIdx].indexOf(':') + 1).trim()
+    if (!customerName) return null
+
+    // Extract No. HP (optional)
+    const hpIdx = lowerLines.findIndex(l =>
+        l.startsWith('no. hp:') || l.startsWith('no hp:') || l.startsWith('hp:')
+    )
+    let phone: string | null = null
+    if (hpIdx !== -1) {
+        const val = lines[hpIdx].slice(lines[hpIdx].indexOf(':') + 1).trim()
+        phone = val || null
+    }
+
+    // Build set of valid codes for quick lookup
+    const validCodes = new Set(products.map(p => p.code.toLowerCase()))
+
+    // Extract product lines (format: CODE | ... | qty)
+    const items: OrderItem[] = []
+    for (const line of lines) {
+        if (!line.includes('|')) continue
+        const parts = line.split('|').map(p => p.trim())
+        if (parts.length < 2) continue
+
+        const code = parts[0].toUpperCase()
+        if (!validCodes.has(code.toLowerCase())) continue
+
+        const qtyStr = parts[parts.length - 1]
+        const qty = parseInt(qtyStr, 10)
+        if (!isNaN(qty) && qty > 0) {
+            items.push({ code, qty })
+        }
+    }
+
+    if (items.length === 0) return null
+
+    return { customerName, phone, items }
+}
+
 interface ProductUpsertRow {
     code: string
     name: string
@@ -327,6 +472,56 @@ export function parseProductUpsertLines(text: string): ProductUpsertRow[] | null
 
         if (!code || !name || isNaN(hpp) || isNaN(price)) return null
         rows.push({ code: code.toUpperCase(), name, hpp, price })
+    }
+
+    return rows.length > 0 ? rows : null
+}
+
+// ─── Product form (multi-step flow) ──────────────────────────────────────────
+
+/**
+ * Generate the product form template to send to the user.
+ */
+export function buildProductFormTemplate(): string {
+    return (
+        `📋 *Form Produk Baru*\n` +
+        `Satu produk per baris, isi semua kolom 👇\n` +
+        `_(ketik /batal untuk membatalkan)_\n\n` +
+        `*Kode | Nama Produk | HPP | Harga Jual*\n` +
+        ` |  |  | \n` +
+        ` |  |  | \n` +
+        ` |  |  | \n\n` +
+        `_Kode: singkatan unik produk (mis: SD, CR)_\n` +
+        `_HPP: harga pokok / modal_`
+    )
+}
+
+/**
+ * Parse a filled product form (pipe-separated).
+ * Also accepts the old comma-separated format for backward compat.
+ * Skips empty rows and the header row.
+ */
+export function parseProductForm(text: string): ProductUpsertRow[] | null {
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+    const rows: ProductUpsertRow[] = []
+
+    for (const line of lines) {
+        const sep = line.includes('|') ? '|' : ','
+        const parts = line.split(sep).map(s => s.trim())
+        if (parts.length < 4) continue
+
+        const [codeRaw, name, hppRaw, priceRaw] = parts
+        const code = codeRaw.toUpperCase()
+
+        // Skip header row or empty rows
+        if (!code || code === 'KODE' || !name || name === 'NAMA PRODUK') continue
+
+        const hpp   = parseInt(hppRaw.replace(/\D/g, ''), 10)
+        const price = parseInt(priceRaw.replace(/\D/g, ''), 10)
+
+        if (!code || !name || isNaN(hpp) || isNaN(price)) continue
+
+        rows.push({ code, name, hpp, price })
     }
 
     return rows.length > 0 ? rows : null

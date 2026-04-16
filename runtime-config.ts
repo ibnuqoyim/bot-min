@@ -33,8 +33,15 @@ interface RuntimeConfig {
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let globalConfig: RuntimeConfig = buildDefaults()
+/** phone → first binding (backward compat) */
 let numberToBinding = new Map<string, StoreBinding>()
+/** phone → all accessible bindings (multi-store) */
+let numberToBindings = new Map<string, StoreBinding[]>()
+/** resolved JID → storeId the user has switched to this session */
+const activeStoreByJid = new Map<string, string>()
 let loadedBindings: StoreBinding[] = []
+/** Set of phone numbers with super admin privileges (create/update stores). */
+let superAdminSet = new Set<string>(config.superAdminNumbers)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -56,6 +63,10 @@ function buildDefaults(): RuntimeConfig {
     }
 }
 
+function parseCsvPhones(csv: string): string[] {
+    return csv ? csv.split(',').map((n: string) => n.trim()).filter(Boolean) : []
+}
+
 function buildBindingFromRow(row: Record<string, any>, defaults: RuntimeConfig): StoreBinding {
     return {
         botConfigId:    row.id,
@@ -64,21 +75,28 @@ function buildBindingFromRow(row: Record<string, any>, defaults: RuntimeConfig):
         systemPrompt:   row.system_prompt?.trim() || defaults.systemPrompt,
         aiProvider:     row.ai_provider || defaults.aiProvider,
         aiModel:        row.ai_model    || defaults.aiModel,
-        allowedNumbers: row.allowed_numbers
-            ? row.allowed_numbers.split(',').map((n: string) => n.trim()).filter(Boolean)
-            : [],
+        allowedNumbers: parseCsvPhones(row.allowed_numbers ?? ''),
     }
 }
 
 function rebuildLookup(bindings: StoreBinding[]) {
-    const newMap = new Map<string, StoreBinding>()
+    const allMap  = new Map<string, StoreBinding[]>()
+    const firstMap = new Map<string, StoreBinding>()
+
     for (const b of bindings) {
         for (const phone of b.allowedNumbers) {
-            // First binding wins if a number appears in multiple stores
-            if (!newMap.has(phone)) newMap.set(phone, b)
+            // Collect all bindings per phone (multi-store)
+            const list = allMap.get(phone) ?? []
+            if (!list.find(x => x.storeId === b.storeId)) list.push(b)
+            allMap.set(phone, list)
+
+            // First binding per phone (backward compat)
+            if (!firstMap.has(phone)) firstMap.set(phone, b)
         }
     }
-    numberToBinding = newMap
+
+    numberToBindings = allMap
+    numberToBinding  = firstMap
 }
 
 // ─── Load from Supabase ───────────────────────────────────────────────────────
@@ -107,6 +125,15 @@ async function loadFromSupabase(): Promise<void> {
         // Rebuild phone lookup
         rebuildLookup(loadedBindings)
 
+        // Rebuild super admin set: env vars + all super_admin_numbers from DB
+        superAdminSet = new Set(config.superAdminNumbers)
+        for (const row of rows) {
+            for (const phone of parseCsvPhones(row.super_admin_numbers ?? '')) {
+                superAdminSet.add(phone)
+            }
+        }
+        console.log(`[config] Super admins: ${superAdminSet.size} number(s)`)
+
         // Global config = first binding (for AI startup / backward compat)
         const first = loadedBindings[0]
         globalConfig = {
@@ -133,7 +160,7 @@ export function getRuntimeConfig(): RuntimeConfig {
 }
 
 /**
- * Resolve which store a phone number belongs to.
+ * Resolve which store a phone number belongs to (first/default binding).
  * Returns null if the number is not whitelisted in any store.
  */
 export function resolveStoreForNumber(phone: string): StoreBinding | null {
@@ -154,6 +181,61 @@ export function resolveStoreForNumber(phone: string): StoreBinding | null {
         return null
     }
     return numberToBinding.get(phone) ?? null
+}
+
+/**
+ * Resolve the currently active store binding for a JID.
+ * Respects per-session store switch (/store switch), falls back to first binding.
+ */
+export function resolveActiveBinding(phone: string, jid: string): StoreBinding | null {
+    // Multi-bot mode with no DB: fall back to env defaults
+    if (config.botStoreId && numberToBindings.size === 0) {
+        return resolveStoreForNumber(phone)
+    }
+
+    const bindings = numberToBindings.get(phone) ?? []
+    if (bindings.length === 0) {
+        // LID fallback handled in whatsapp.ts; return null here
+        return null
+    }
+
+    // Check if user has switched to a specific store this session
+    const override = activeStoreByJid.get(jid)
+    if (override) {
+        const found = bindings.find(b => b.storeId === override)
+        if (found) return found
+        // Override stale (store removed from whitelist) — clear and use first
+        activeStoreByJid.delete(jid)
+    }
+
+    return bindings[0]
+}
+
+/**
+ * All store bindings accessible to a phone number.
+ */
+export function getAccessibleBindings(phone: string): StoreBinding[] {
+    if (config.botStoreId && numberToBindings.size === 0) {
+        const b = resolveStoreForNumber(phone)
+        return b ? [b] : []
+    }
+    return numberToBindings.get(phone) ?? []
+}
+
+/**
+ * Switch the active store for a JID.
+ * Accepts a full store UUID or a prefix (min 4 chars).
+ * Returns the matched binding, or null if no match / not accessible.
+ */
+export function switchActiveStore(phone: string, jid: string, storeIdOrPrefix: string): StoreBinding | null {
+    const bindings = numberToBindings.get(phone) ?? []
+    const match = bindings.find(b =>
+        b.storeId === storeIdOrPrefix ||
+        (storeIdOrPrefix.length >= 4 && b.storeId?.startsWith(storeIdOrPrefix))
+    )
+    if (!match || !match.storeId) return null
+    activeStoreByJid.set(jid, match.storeId)
+    return match
 }
 
 /** Add a phone number to a specific store's whitelist and reload config. */
@@ -194,6 +276,37 @@ export async function addNumberToWhitelist(phoneNumber: string, storeId: string)
     // Reload immediately so the new number works without waiting for next poll
     await loadFromSupabase()
     console.log(`[config] Whitelist updated for store ${storeId} — added: ${phoneNumber}`)
+}
+
+/**
+ * Returns true if the phone number has super admin privileges
+ * (can create/update stores). Sourced from SUPER_ADMIN_PHONES env var
+ * and all super_admin_numbers fields in bot_config rows.
+ */
+export function isSuperAdmin(phone: string): boolean {
+    return superAdminSet.has(phone)
+}
+
+/**
+ * Build a minimal StoreBinding for a super admin that has no store context yet
+ * (e.g., before they create their first store or switch to one).
+ */
+export function buildSuperAdminBinding(): StoreBinding {
+    const defaults = buildDefaults()
+    return {
+        botConfigId:    '',
+        storeId:        null,
+        isActive:       true,
+        systemPrompt:   defaults.systemPrompt,
+        aiProvider:     defaults.aiProvider,
+        aiModel:        defaults.aiModel,
+        allowedNumbers: [],
+    }
+}
+
+/** Force-reload config from Supabase immediately (e.g. after creating a store). */
+export async function reloadConfig(): Promise<void> {
+    await loadFromSupabase()
 }
 
 export async function startConfigPolling(intervalMs = 5 * 60 * 1000): Promise<void> {
