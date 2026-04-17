@@ -175,6 +175,63 @@ export async function updateItemQty(
  * Set or update shipping for an order.
  * If a delivery row already exists, it is updated. Otherwise a new one is inserted.
  */
+// ─── batal order ─────────────────────────────────────────────────────────────
+
+/**
+ * Cancel an order by customer name.
+ * - Rejected if the order is already paid.
+ * - Rejected if the order is already cancelled.
+ * - Sets status to 'cancelled'. Items and delivery rows are kept for audit trail.
+ */
+export async function cancelOrder(customerName: string, storeId?: string | null): Promise<string> {
+    const sb = getSupabase()
+    const order = await findOrder(customerName, storeId)
+    if (!order) throw new Error(`Pesanan "${customerName}" tidak ditemukan.`)
+
+    // Fetch current status + items for summary
+    const { data: full } = await sb
+        .from('orders')
+        .select(`
+            id, invoice_number, customer_name, status, date,
+            order_items ( quantity, price, products ( name ) )
+        `)
+        .eq('id', order.id)
+        .single()
+
+    if (!full) throw new Error('Gagal mengambil detail order.')
+
+    if (full.status === 'paid') {
+        return (
+            `⚠️ Order *${full.customer_name}* (${full.invoice_number}) sudah *LUNAS* dan tidak bisa dibatalkan.\n\n` +
+            `Hubungi pemilik toko jika ada kesalahan.`
+        )
+    }
+
+    if (full.status === 'cancelled') {
+        return `ℹ️ Order *${full.customer_name}* (${full.invoice_number}) sudah dibatalkan sebelumnya.`
+    }
+
+    const { error } = await sb
+        .from('orders')
+        .update({ status: 'cancelled' })
+        .eq('id', order.id)
+
+    if (error) throw error
+
+    const items = full.order_items as { quantity: number; price: number; products: { name: string } | null }[]
+    const total = items.reduce((s, i) => s + i.price * i.quantity, 0)
+    const itemLines = items
+        .map(i => `  - ${i.products?.name ?? '?'} x${i.quantity} = ${fmt(i.price * i.quantity)}`)
+        .join('\n')
+
+    return (
+        `❌ Order *${full.customer_name}* dibatalkan.\n\n` +
+        `📋 Invoice: ${full.invoice_number} | ${full.date}\n\n` +
+        `${itemLines}\n\n` +
+        `💰 Total yang dibatalkan: *${fmt(total)}*`
+    )
+}
+
 // ─── bayar ────────────────────────────────────────────────────────────────────
 
 /**

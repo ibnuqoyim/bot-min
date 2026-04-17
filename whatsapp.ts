@@ -19,14 +19,15 @@ import type { AIProvider } from './providers/types.ts'
 import { createBatchPO, getProductsForPOForm, buildPOFormTemplate, parsePOForm, type POFormProduct } from './tools/po.ts'
 import { createOrder, getOrdersByCustomer, getLatestBatchResume, parseOrderItems, getProductList, upsertProducts, parseProductUpsertLines, getProductsForOrderForm, buildOrderFormTemplate, parseOrderForm, buildProductFormTemplate, parseProductForm, type OrderFormProduct } from './tools/order.ts'
 import { generateInvoicePDF } from './tools/invoice.ts'
-import { addItemsToOrder, updateItemQty, setShipping, markOrderPaid } from './tools/update-order.ts'
-import { parseStoreForm, createStore, uploadLogoToCloudinary, updateStoreLogo, STORE_FORM_TEMPLATE } from './tools/store.ts'
+import { addItemsToOrder, updateItemQty, setShipping, markOrderPaid, cancelOrder } from './tools/update-order.ts'
+import { parseStoreForm, createStore, updateStore, getStoreInfo, buildStoreUpdateForm, uploadLogoToCloudinary, updateStoreLogo, STORE_FORM_TEMPLATE } from './tools/store.ts'
 
 // ─── Multi-step flow state ────────────────────────────────────────────────────
 
 type FlowState =
     | { step: 'waiting_form' }
     | { step: 'waiting_logo'; storeId: string; storeName: string }
+    | { step: 'waiting_store_update'; storeId: string; storeName: string }
     | { step: 'waiting_order'; products: OrderFormProduct[]; batchName: string | null }
     | { step: 'waiting_po_form'; products: POFormProduct[] }
     | { step: 'waiting_product_form' }
@@ -255,6 +256,86 @@ async function handleMessage(
         return
     }
 
+    // ── /store info — show current store details ──────────────────────────────
+    if (text.toLowerCase() === '/store info') {
+        if (!storeId) {
+            await sendText(sock, rawJid, '⚠️ Kamu belum terhubung ke toko manapun. Gunakan /store list.')
+            return
+        }
+        try {
+            const result = await getStoreInfo(storeId)
+            await sendText(sock, rawJid, result)
+        } catch (err: any) {
+            await sendText(sock, rawJid, `⚠️ ${err.message}`)
+        }
+        return
+    }
+
+    // ── /store update — update store info via pre-filled form ────────────────
+    if (text.toLowerCase() === '/store update') {
+        if (!isSuperAdmin(phoneNum)) {
+            await sendText(sock, rawJid, '⛔ Hanya super admin yang bisa mengubah informasi toko.')
+            return
+        }
+        if (!storeId) {
+            await sendText(sock, rawJid, '⚠️ Kamu belum terhubung ke toko manapun.')
+            return
+        }
+        try {
+            await sock.sendPresenceUpdate('composing', rawJid)
+            const form = await buildStoreUpdateForm(storeId)
+
+            // Fetch store name for the flow state
+            let storeName = storeId
+            try {
+                const { getSupabase } = await import('./supabase.ts')
+                const { data } = await getSupabase().from('stores').select('name').eq('id', storeId).maybeSingle()
+                if (data?.name) storeName = data.name
+            } catch { /* use storeId */ }
+
+            pendingFlows.set(jid, { step: 'waiting_store_update', storeId, storeName })
+            await sendText(
+                sock, rawJid,
+                `✏️ *Update Info Toko — ${storeName}*\n\n` +
+                `Edit form berikut lalu kirim kembali:\n\n` +
+                form +
+                `\n\n_(Ketik /batal untuk membatalkan.)_`,
+            )
+        } catch (err: any) {
+            await sendText(sock, rawJid, `⚠️ ${err.message}`)
+        }
+        return
+    }
+
+    // ── /store logo — replace store logo via image upload ────────────────────
+    if (text.toLowerCase() === '/store logo') {
+        if (!isSuperAdmin(phoneNum)) {
+            await sendText(sock, rawJid, '⛔ Hanya super admin yang bisa mengganti logo toko.')
+            return
+        }
+        if (!storeId) {
+            await sendText(sock, rawJid, '⚠️ Kamu belum terhubung ke toko manapun.')
+            return
+        }
+        try {
+            let storeName = storeId
+            const { getSupabase } = await import('./supabase.ts')
+            const { data } = await getSupabase().from('stores').select('name').eq('id', storeId).maybeSingle()
+            if (data?.name) storeName = data.name
+
+            pendingFlows.set(jid, { step: 'waiting_logo', storeId, storeName })
+            await sendText(
+                sock, rawJid,
+                `🖼️ *Ganti Logo — ${storeName}*\n\n` +
+                `Kirim foto logo baru sekarang.\n` +
+                `_(Ketik /batal untuk membatalkan.)_`,
+            )
+        } catch (err: any) {
+            await sendText(sock, rawJid, `⚠️ ${err.message}`)
+        }
+        return
+    }
+
     if (text.toLowerCase() === '/help') {
         await sendText(
             sock,
@@ -268,6 +349,7 @@ async function handleMessage(
             `/resume              — ringkasan order di batch terbaru\n` +
             `/cari <nama>         — cari pesanan by nama pemesan\n` +
             `/bayar <nama>        — tandai order lunas\n` +
+            `/batal order <nama>  — batalkan order (hanya jika belum lunas)\n` +
             `/invoice <nama>      — kirim PDF invoice ke WhatsApp\n` +
             `/order baru          — buat order via form (untuk customer)\n` +
             `/order <nama> | <kode:qty,...>  — buat order cepat (admin)\n` +
@@ -280,9 +362,12 @@ async function handleMessage(
             `/produk baru                   — tambah/update produk via form\n` +
             `/produk upsert <data>          — bulk upsert produk (admin)\n\n` +
             `*Manajemen Toko:*\n` +
+            `/store info             — lihat informasi toko aktif\n` +
+            `/store update           — update info toko (super admin)\n` +
+            `/store logo             — ganti logo toko (super admin)\n` +
             `/store list             — lihat semua toko yang bisa diakses\n` +
             `/store switch <id>      — ganti toko aktif\n` +
-            `/store baru             — buat toko baru (multi-step)\n\n` +
+            `/store baru             — buat toko baru (super admin)\n\n` +
             `*Bot:*\n` +
             `/whitelist <store-id> — daftarkan nomor kamu ke bot ini\n` +
             `/status — status bot\n` +
@@ -473,6 +558,42 @@ async function handleMessage(
         }
     }
 
+    if (flow?.step === 'waiting_store_update') {
+        if (text.toLowerCase() === '/batal') {
+            pendingFlows.delete(jid)
+            await sendText(sock, rawJid, '❌ Update info toko dibatalkan.')
+            return
+        }
+        if (text.startsWith('/')) {
+            pendingFlows.delete(jid)
+            // fall through
+        } else {
+            const parsed = parseStoreForm(text)
+            if (!parsed) {
+                await sendText(
+                    sock, rawJid,
+                    `⚠️ Form tidak dikenali. Pastikan baris *Nama Toko:* terisi.\n\n` +
+                    `Ketik */store update* untuk memulai ulang, atau */batal* untuk membatalkan.`,
+                )
+                return
+            }
+            try {
+                await sock.sendPresenceUpdate('composing', rawJid)
+                await updateStore(flow.storeId, parsed)
+                pendingFlows.delete(jid)
+                await sendText(
+                    sock, rawJid,
+                    `✅ Info toko *${parsed.name}* berhasil diperbarui.\n\n` +
+                    `Ketik /store info untuk melihat hasilnya.`,
+                )
+            } catch (err: any) {
+                pendingFlows.delete(jid)
+                await sendText(sock, rawJid, `⚠️ ${err.message}`)
+            }
+            return
+        }
+    }
+
     if (flow?.step === 'waiting_logo') {
         if (hasImage) {
             try {
@@ -484,7 +605,7 @@ async function handleMessage(
 
                 await sendText(
                     sock, rawJid,
-                    `✅ Logo *${flow.storeName}* berhasil diupload!\n${logoUrl}`,
+                    `✅ Logo *${flow.storeName}* berhasil diupload!`,
                 )
             } catch (err: any) {
                 pendingFlows.delete(jid)
@@ -493,10 +614,9 @@ async function handleMessage(
             return
         }
 
-        // Text message while waiting for logo
         if (text.toLowerCase() === '/batal') {
             pendingFlows.delete(jid)
-            await sendText(sock, rawJid, '✅ Logo dilewati. Toko berhasil dibuat tanpa logo.')
+            await sendText(sock, rawJid, '❌ Upload logo dibatalkan.')
             return
         }
 
@@ -565,7 +685,7 @@ async function handleMessage(
 
             try {
                 await sock.sendPresenceUpdate('composing', rawJid)
-                const result = await createOrder(parsed.customerName, parsed.items, storeId, parsed.phone)
+                const result = await createOrder(parsed.customerName, parsed.items, storeId, parsed.phone, parsed.address)
                 pendingFlows.delete(jid)
                 await sendText(sock, rawJid, result)
             } catch (err: any) {
@@ -688,6 +808,21 @@ async function handleMessage(
                 caption: `📄 Invoice *${invoiceNumber}* untuk *${customerName}*`,
             })
             console.log(`[wa] → ${jid.split('@')[0]}: sent invoice PDF ${fileName}`)
+        } catch (err: any) {
+            await sendText(sock, rawJid, `⚠️ ${err.message}`)
+        }
+        return
+    }
+
+    if (text.toLowerCase().startsWith('/batal order ')) {
+        const name = text.slice('/batal order '.length).trim()
+        if (!name) {
+            await sendText(sock, rawJid, '⚠️ Format: /batal order <nama pemesan>')
+            return
+        }
+        try {
+            const result = await cancelOrder(name, storeId)
+            await sendText(sock, rawJid, result)
         } catch (err: any) {
             await sendText(sock, rawJid, `⚠️ ${err.message}`)
         }

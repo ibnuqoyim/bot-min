@@ -13,9 +13,10 @@ Bot ini dioperasikan lewat **pesan teks WhatsApp**. Semua perintah diawali denga
 5. [Update Order](#5-update-order)
 6. [Invoice & Pembayaran](#6-invoice--pembayaran)
 7. [Multi-Store](#7-multi-store)
-8. [Buat Toko Baru](#8-buat-toko-baru)
-9. [Perintah Umum](#9-perintah-umum)
-10. [Catatan Penting](#10-catatan-penting)
+8. [Kelola Info Toko](#8-kelola-info-toko)
+9. [Buat Toko Baru](#9-buat-toko-baru)
+10. [Perintah Umum](#10-perintah-umum)
+11. [Catatan Penting](#11-catatan-penting)
 
 ---
 
@@ -348,6 +349,25 @@ Bot akan membalas dengan ringkasan total pembayaran dan mengubah status order me
 
 ---
 
+### Batalkan Order
+
+```
+/batal order <nama pemesan>
+```
+
+**Contoh:**
+```
+/batal order Budi
+/batal order Siti
+```
+
+Bot akan mengubah status order menjadi **DIBATALKAN** dan menampilkan ringkasan order yang dibatalkan.
+
+> Order yang sudah **LUNAS** tidak bisa dibatalkan.  
+> Data order tetap tersimpan untuk keperluan pencatatan.
+
+---
+
 ## 7. Multi-Store
 
 Satu nomor WhatsApp bisa terdaftar di **beberapa toko sekaligus**. Gunakan perintah berikut untuk berpindah antar toko.
@@ -393,7 +413,56 @@ Setelah ganti toko, semua perintah (`/order`, `/resume`, `/invoice`, dll) akan o
 
 ---
 
-## 8. Buat Toko Baru
+## 8. Kelola Info Toko
+
+> Perintah update dan logo hanya bisa diakses oleh **super admin**.
+
+### Lihat Informasi Toko
+
+```
+/store info
+```
+
+Menampilkan semua informasi toko aktif: nama, kontak, rekening bank, kode invoice, dan status logo.
+
+---
+
+### Update Informasi Toko
+
+```
+/store update
+```
+
+Bot akan mengirim form yang sudah terisi dengan data toko saat ini:
+
+```
+Nama Toko: Toko Utama
+No. Telepon: 628112345678
+Nama Bank: BCA
+No. Rekening: 1234567890
+Atas Nama: Budi Santoso
+Pesan Penutup Invoice: Terima kasih sudah order!
+Kode Invoice: TU
+```
+
+Edit field yang ingin diubah, lalu kirim kembali ke bot.
+
+> Field **Nama Toko** wajib diisi.  
+> Field yang dikosongkan akan dihapus dari data toko.
+
+---
+
+### Ganti Logo Toko
+
+```
+/store logo
+```
+
+Bot akan meminta foto logo baru. Kirim foto langsung di chat — bot otomatis upload ke Cloudinary dan menggantikan logo lama.
+
+---
+
+## 9. Buat Toko Baru
 
 Buat toko baru langsung dari bot melalui **flow multi-langkah**.
 
@@ -443,7 +512,7 @@ Ketik `/batal` kapanpun untuk membatalkan proses atau skip langkah logo.
 
 ---
 
-## 9. Perintah Umum
+## 10. Perintah Umum
 
 | Perintah | Fungsi |
 |---|---|
@@ -454,7 +523,7 @@ Ketik `/batal` kapanpun untuk membatalkan proses atau skip langkah logo.
 
 ---
 
-## 10. Catatan Penting
+## 11. Catatan Penting
 
 **Nama pemesan tidak harus lengkap** — bot akan mencari yang paling cocok. Tapi gunakan nama yang cukup unik agar tidak salah order.
 

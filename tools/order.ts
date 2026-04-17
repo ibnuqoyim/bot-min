@@ -78,6 +78,7 @@ export async function createOrder(
     items: OrderItem[],
     storeId?: string | null,
     phone?: string | null,
+    address?: string | null,
 ): Promise<string> {
     const sb = getSupabase()
 
@@ -162,6 +163,16 @@ export async function createOrder(
 
     if (itemsError) throw itemsError
 
+    // Create delivery row when address is provided (ongkir default 0, diupdate nanti)
+    if (address?.trim()) {
+        await sb.from('deliveries').insert({
+            order_id:      order.id,
+            address:       address.trim(),
+            shipping_cost: 0,
+            status:        'pending',
+        })
+    }
+
     const total = resolvedItems.reduce((sum, i) => sum + i.price * i.quantity, 0)
     const itemLines = resolvedItems
         .map(i => `  - ${i.name} x${i.quantity} = ${formatRupiah(i.price * i.quantity)}`)
@@ -172,8 +183,10 @@ export async function createOrder(
         `📋 Invoice: *${invoiceNumber}*\n` +
         `👤 ${customerName.trim()}\n` +
         (batch ? `📦 Batch: ${batch.name}\n` : '') +
+        (address?.trim() ? `📍 ${address.trim()}\n` : '') +
         `\n${itemLines}\n\n` +
-        `💰 Total: *${formatRupiah(total)}*`
+        `💰 Total: *${formatRupiah(total)}*` +
+        (address?.trim() ? `\n\n_Ongkir belum termasuk, akan dikonfirmasi terpisah._` : '')
     )
 }
 
@@ -313,6 +326,7 @@ export interface OrderFormProduct {
 export interface OrderFormResult {
     customerName: string
     phone: string | null
+    address: string | null
     items: OrderItem[]
 }
 
@@ -386,7 +400,8 @@ export function buildOrderFormTemplate(
         `\nIsi form berikut lalu kirim kembali 👇\n` +
         `_(ketik /batal untuk membatalkan)_\n\n` +
         `Nama: \n` +
-        `No. HP: \n\n` +
+        `No. HP: \n` +
+        `Alamat: \n\n` +
         `*— Produk —*\n` +
         `_(isi angka qty, biarkan kosong jika tidak order)_\n\n` +
         productLines
@@ -420,6 +435,14 @@ export function parseOrderForm(
         phone = val || null
     }
 
+    // Extract Alamat (optional)
+    const alamatIdx = lowerLines.findIndex(l => l.startsWith('alamat:'))
+    let address: string | null = null
+    if (alamatIdx !== -1) {
+        const val = lines[alamatIdx].slice(lines[alamatIdx].indexOf(':') + 1).trim()
+        address = val || null
+    }
+
     // Build set of valid codes for quick lookup
     const validCodes = new Set(products.map(p => p.code.toLowerCase()))
 
@@ -442,7 +465,7 @@ export function parseOrderForm(
 
     if (items.length === 0) return null
 
-    return { customerName, phone, items }
+    return { customerName, phone, address, items }
 }
 
 interface ProductUpsertRow {

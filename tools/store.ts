@@ -114,6 +114,95 @@ async function createBotConfigForStore(storeId: string, creatorPhone?: string): 
     }
 }
 
+// ─── Get store info ───────────────────────────────────────────────────────────
+
+/**
+ * Fetch and format current store information for display in WhatsApp.
+ */
+export async function getStoreInfo(storeId: string): Promise<string> {
+    const sb = getSupabase()
+    const { data, error } = await sb
+        .from('stores')
+        .select('name, phone, bank_name, bank_account, bank_holder, invoice_closing_message, invoice_prefix, logo_url, is_active')
+        .eq('id', storeId)
+        .single()
+
+    if (error || !data) throw new Error('Toko tidak ditemukan.')
+
+    const val = (v: string | null | undefined, fallback = '—') => v?.trim() || fallback
+    const logoLine = data.logo_url
+        ? `✅ Terpasang`
+        : `❌ Belum ada`
+
+    return (
+        `🏪 *Informasi Toko*\n\n` +
+        `Nama Toko           : ${val(data.name)}\n` +
+        `No. Telepon         : ${val(data.phone)}\n` +
+        `Nama Bank           : ${val(data.bank_name)}\n` +
+        `No. Rekening        : ${val(data.bank_account)}\n` +
+        `Atas Nama           : ${val(data.bank_holder)}\n` +
+        `Pesan Invoice       : ${val(data.invoice_closing_message)}\n` +
+        `Kode Invoice        : ${val(data.invoice_prefix)}\n` +
+        `Logo                : ${logoLine}\n` +
+        `Status              : ${data.is_active ? '🟢 Aktif' : '🔴 Nonaktif'}\n\n` +
+        `_Gunakan /store update untuk mengubah info toko._\n` +
+        `_Gunakan /store logo untuk mengganti logo._`
+    )
+}
+
+// ─── Update store info ────────────────────────────────────────────────────────
+
+/**
+ * Build a pre-filled update form with current store values.
+ */
+export async function buildStoreUpdateForm(storeId: string): Promise<string> {
+    const sb = getSupabase()
+    const { data, error } = await sb
+        .from('stores')
+        .select('name, phone, bank_name, bank_account, bank_holder, invoice_closing_message, invoice_prefix')
+        .eq('id', storeId)
+        .single()
+
+    if (error || !data) throw new Error('Toko tidak ditemukan.')
+
+    const v = (val: string | null | undefined) => val?.trim() ?? ''
+
+    return (
+        `Nama Toko: ${v(data.name)}\n` +
+        `No. Telepon: ${v(data.phone)}\n` +
+        `Nama Bank: ${v(data.bank_name)}\n` +
+        `No. Rekening: ${v(data.bank_account)}\n` +
+        `Atas Nama: ${v(data.bank_holder)}\n` +
+        `Pesan Penutup Invoice: ${v(data.invoice_closing_message)}\n` +
+        `Kode Invoice: ${v(data.invoice_prefix)}`
+    )
+}
+
+/**
+ * Update store fields. Uses the same StoreFormData shape as createStore.
+ * Empty/null values clear the field in the database.
+ */
+export async function updateStore(storeId: string, data: StoreFormData): Promise<string> {
+    const sb = getSupabase()
+
+    const { error } = await sb
+        .from('stores')
+        .update({
+            name:                    data.name,
+            phone:                   data.phone,
+            bank_name:               data.bank_name,
+            bank_account:            data.bank_account,
+            bank_holder:             data.bank_holder,
+            invoice_closing_message: data.invoice_closing_message,
+            invoice_prefix:          data.invoice_prefix,
+        })
+        .eq('id', storeId)
+
+    if (error) throw new Error('Gagal update toko: ' + error.message)
+
+    return `✅ Informasi toko berhasil diperbarui.`
+}
+
 // ─── Upload logo to Cloudinary ────────────────────────────────────────────────
 
 /**
